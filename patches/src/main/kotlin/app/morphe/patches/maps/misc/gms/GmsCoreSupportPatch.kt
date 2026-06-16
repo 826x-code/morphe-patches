@@ -1,6 +1,8 @@
 package app.morphe.patches.maps.misc.gms
 
+import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.patch.resourcePatch
+import app.morphe.util.returnEarly
 import app.morphe.patches.all.misc.packagename.changePackageNamePatch
 import app.morphe.patches.all.misc.packagename.setOrGetFallbackPackageName
 import app.morphe.patches.maps.misc.extension.sharedExtensionPatch
@@ -16,6 +18,20 @@ private const val GMS_CORE_VENDOR_GROUP_ID = "app.revanced"
 // Google Maps signing certificate SHA-1 (stable across versions).
 private const val MAPS_SPOOFED_PACKAGE_SIGNATURE = "38918a453d07199354f8b19af05ec6562ced5788"
 
+/**
+ * Forces Maps' isGooglePlayServicesAvailable() to return 0 (SUCCESS).
+ *
+ * Needed because the shared builder's GooglePlayUtilityFingerprint is optional and does not match
+ * Maps, so without this the check returns "unavailable" -> "Install Play services" prompt, idle GPS
+ * loss, broken sign-in. Runs as a dependency (before the string rewrite), so the rewrite-safe string
+ * anchors in MapsPlayServicesAvailabilityFingerprint are intact.
+ */
+internal val mapsForceGmsAvailablePatch = bytecodePatch {
+    execute {
+        MapsPlayServicesAvailabilityFingerprint.method.returnEarly(0)
+    }
+}
+
 @Suppress("unused")
 val gmsCoreSupportPatch = gmsCoreSupportPatch(
     fromPackageName = MAPS_PACKAGE_NAME,
@@ -24,13 +40,13 @@ val gmsCoreSupportPatch = gmsCoreSupportPatch(
     primeMethodFingerprint = null,
     earlyReturnFingerprints = setOf(),
     // NOTE: the shared builder ALWAYS returns ServiceCheckFingerprint early and, if present,
-    // GooglePlayUtilityFingerprint early(0). In Maps 26.20.x these matched "Lbijd;" b()/c()
-    // exactly, so no extra earlyReturnFingerprints are needed.
+    // GooglePlayUtilityFingerprint early(0). On Maps, ServiceCheck matches ("Lbijd;" c()), but
+    // GooglePlayUtility does NOT (different strings) -> handled by mapsForceGmsAvailablePatch below.
     mainActivityOnCreateFingerprint = MapsMainActivityOnCreateFingerprint,
     extensionPatch = sharedExtensionPatch,
     gmsCoreSupportResourcePatchFactory = ::mapsGmsCoreSupportResourcePatch,
 ) {
-    dependsOn(sharedExtensionPatch)
+    dependsOn(sharedExtensionPatch, mapsForceGmsAvailablePatch)
     compatibleWith(COMPATIBILITY_MAPS)
 }
 
