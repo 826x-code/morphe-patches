@@ -18,6 +18,10 @@ private const val GMS_CORE_VENDOR_GROUP_ID = "app.revanced"
 // Google Maps signing certificate SHA-1 (stable across versions).
 private const val MAPS_SPOOFED_PACKAGE_SIGNATURE = "38918a453d07199354f8b19af05ec6562ced5788"
 
+// Appended to versionName so your builds are identifiable (e.g. "26.40.xx.xxx-826x").
+// Change this string to whatever tag you want (or "" to disable).
+private const val BUILD_TAG_SUFFIX = "-826x"
+
 /**
  * Forces Maps' isGooglePlayServicesAvailable() to return 0 (SUCCESS).
  *
@@ -85,8 +89,17 @@ private fun mapsGmsCoreSupportResourcePatch() = resourcePatch {
             transformations.entries.fold(manifest.readText()) { acc, (from, to) -> acc.replace(from, to) }
         )
 
-        // --- addSpoofingMetadata() ---
+        // --- addSpoofingMetadata() + build tag ---
         document("AndroidManifest.xml").use { document ->
+            // Tag versionName so your builds are identifiable (e.g. "26.40.xx.xxx-826x").
+            if (BUILD_TAG_SUFFIX.isNotEmpty()) {
+                val manifestElement = document.documentElement
+                val versionName = manifestElement.getAttribute("android:versionName")
+                if (versionName.isNotEmpty() && !versionName.endsWith(BUILD_TAG_SUFFIX)) {
+                    manifestElement.setAttribute("android:versionName", versionName + BUILD_TAG_SUFFIX)
+                }
+            }
+
             val application = document.getElementsByTagName("application").item(0)
             application.adoptChild("meta-data") {
                 setAttribute("android:name", "$GMS_CORE_VENDOR_GROUP_ID.android.gms.SPOOFED_PACKAGE_NAME")
