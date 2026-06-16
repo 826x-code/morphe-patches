@@ -8,7 +8,7 @@ import app.morphe.patches.maps.misc.extension.hooks.mapsApplicationInitHook
 // If the build complains that "maps" is unknown, try listOf("shared") and delete the
 // extensions/maps module (the shared extension already contains everything Maps needs).
 val sharedExtensionPatch = sharedExtensionPatch(
-    listOf("maps"),
+    listOf("maps", "shared-youtube"),
     mapsApplicationInitHook,
     mapsActivityOnCreateHook,
 )
