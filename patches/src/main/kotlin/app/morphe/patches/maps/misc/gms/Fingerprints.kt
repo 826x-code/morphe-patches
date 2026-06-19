@@ -46,9 +46,7 @@ internal object MapsApplicationOnCreateFingerprint : Fingerprint(
  * so the GMS->microG string rewrite never alters them) and force it to return 0.
  */
 internal object MapsPlayServicesAvailabilityFingerprint : Fingerprint(
-    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
     returnType = "I",
-    parameters = listOf("L", "I"),
     strings = listOf(
         "com.google.app.id",
         "android.hardware.type.embedded",
