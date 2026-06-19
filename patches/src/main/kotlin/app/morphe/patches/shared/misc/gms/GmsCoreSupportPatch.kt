@@ -227,7 +227,7 @@ fun gmsCoreSupportPatch(
         OriginalPackageNameExtensionFingerprint.method.returnEarly(fromPackageName)
 
         // Verify GmsCore is installed and whitelisted for power optimizations and background usage.
-        mainActivityOnCreateFingerprint.method.addInstruction(
+        mainActivityOnCreateFingerprint.methodOrNull?.addInstruction(
             0,
             "invoke-static/range { p0 .. p0 }, $EXTENSION_CLASS->" +
                     "checkGmsCore(Landroid/app/Activity;)V"
