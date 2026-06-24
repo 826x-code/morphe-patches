@@ -72,7 +72,7 @@ private fun mapsGmsCoreSupportResourcePatch() = resourcePatch {
             appendChild(child)
         }
 
-        val packageName = setOrGetFallbackPackageName(MORPHE_MAPS_PACKAGE_NAME)
+        val packageName = setOrGetFallbackPackageName(MAPS_PACKAGE_NAME)
 
         // --- patchManifest() ---
         val transformations = mapOf(
