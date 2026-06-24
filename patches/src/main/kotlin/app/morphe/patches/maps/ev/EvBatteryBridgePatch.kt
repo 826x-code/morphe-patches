@@ -1,58 +1,33 @@
 package app.morphe.patches.maps.ev
 
-import app.morphe.patcher.fingerprint.Fingerprint
 import app.morphe.patcher.patch.bytecodePatch
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
-import app.morphe.patcher.extensions.InstructionExtensions.getInstruction
+import app.morphe.util.findMutableMethodOf
 import com.android.tools.smali.dexlib2.Opcode
+import com.android.tools.smali.dexlib2.iface.Method
 import com.android.tools.smali.dexlib2.iface.instruction.OneRegisterInstruction
+import com.android.tools.smali.dexlib2.iface.instruction.ReferenceInstruction
+import com.android.tools.smali.dexlib2.iface.reference.StringReference
 
 /*
  * ============================================================================================
  *  EvBatteryBridge patch — AAOS Maps EV/SOC planning ("Arrive with X%")
  *  Pasangan extension: app/morphe/extension/shared/patches/EvBatteryBridge.java
  *
- *  BEST-EFFORT: semua fingerprint *OrNull + guard. Build ke Maps mobile / versi lain yg
- *  nama obfuscated-nya shift -> fingerprint nggak resolve -> no-op bersih, NGGAK abort build.
+ *  Ditulis pakai API fork (classDefForEach + mutableClassDefBy + findMutableMethodOf),
+ *  TANPA sistem Fingerprint — biar cocok sama API yang dipakai ChangePackageNamePatch.kt.
  *
- *  PIN ke Maps AAOS 26.03.020003.E. Lihat EV-PORT-NOTES.md untuk peta field obfuscated.
+ *  BEST-EFFORT: cuma inject kalau method ketemu. Di Maps mobile / versi lain yg nama
+ *  obfuscated-nya shift -> nggak ketemu -> no-op bersih, NGGAK abort build.
+ *
+ *  PIN ke Maps AAOS 26.03.020003.E. Peta field obfuscated: lihat EV-PORT-NOTES.md.
  * ============================================================================================
  */
 
 private const val EXT = "Lapp/morphe/extension/shared/patches/EvBatteryBridge;"
 
-// --------------------------------------------------------------------------------------------
-// FINGERPRINTS  (3 string-anchor + derivasi sibling; semua rewrite-safe)
-// --------------------------------------------------------------------------------------------
-
-// ANCHOR A: Lmny;->o(Lwdu; Lnoe;)V  (remaining-distance setter). Class Lmny; juga memuat
-// sibling e(Laavb; Rect; Lmse;)Laavb; untuk fixRangeMarkerInMse.
-internal object MapsEvRemainingDistFingerprint : Fingerprint(
-    returnType = "V",
-    strings = listOf("Invalid remaining meters value:"),
-)
-
-// ANCHOR B: Lqft;->b(Lmrb; I Ljava/lang/Integer;)Lqfr;  (search arrival). Class Lqft; juga
-// memuat sibling e(Lmrb; I I Ljava/lang/Integer;)Lqfr; untuk overrideSearchCardAiio.
-internal object MapsEvSearchArrivalFingerprint : Fingerprint(
-    strings = listOf("Invalid number for destinationIndex:"),
-)
-
-// ANCHOR C (SOLID): adsx route-state builder = Lrgw;->h(Lqgt; Z)Ladsx;.
-// Method `h` sendiri TANPA string. Tapi class-nya (Lrgw;, hasil R8 merge) memuat string unik
-// rewrite-safe di salah satu <init>. Kita pin CLASS via string itu, lalu cari `h` secara
-// struktural: satu-satunya method (object, boolean) -> object di class tsb.
-// CATATAN VERSI: pin ini bergantung pada R8 menggabungkan string + `h` ke class yang sama.
-// Di versi lain bisa ke-merge beda -> kalau adsx gagal resolve, ini titik pertama yg di-recheck.
-internal object MapsEvAdsxClassFingerprint : Fingerprint(
-    strings = listOf("BasicClearcutControllerImpl - CountersMap init()"),
-)
-
-// --------------------------------------------------------------------------------------------
-// PATCH
-// --------------------------------------------------------------------------------------------
-
+@Suppress("unused")
 val evBatteryBridgePatch = bytecodePatch(
     name = "EV battery bridge (AAOS)",
     description = "Inject EvBatteryBridge hooks for AAOS Maps EV/SOC route planning. No-op on mobile.",
@@ -60,71 +35,99 @@ val evBatteryBridgePatch = bytecodePatch(
     compatibleWith("com.google.android.apps.maps")
 
     execute {
-        // ---- HOOK 1: captureRemainingDist  (entry, pass p1) ----
-        MapsEvRemainingDistFingerprint.methodOrNull?.apply {
-            addInstruction(
-                0,
-                "invoke-static { p1 }, $EXT->captureRemainingDist(Ljava/lang/Object;)V",
-            )
+        // --- helper: apakah method memuat const-string yang mengandung `needle` ---
+        fun Method.hasString(needle: String): Boolean {
+            val impl = implementation ?: return false
+            return impl.instructions.any { ins ->
+                (ins.opcode == Opcode.CONST_STRING || ins.opcode == Opcode.CONST_STRING_JUMBO) &&
+                    runCatching {
+                        ((ins as ReferenceInstruction).reference as StringReference).string.contains(needle)
+                    }.getOrDefault(false)
+            }
         }
 
-        // ---- HOOK 2: fixRangeMarkerInMse  (sibling 'e' di class Anchor A; entry, pass p3) ----
-        MapsEvRemainingDistFingerprint.classDefOrNull?.methods
-            ?.firstOrNull { m ->
-                m.parameterTypes.size == 3 &&
-                    m.parameterTypes[1] == "Landroid/graphics/Rect;"
-            }
-            ?.apply {
-                addInstruction(
-                    0,
-                    "invoke-static { p3 }, $EXT->fixRangeMarkerInMse(Ljava/lang/Object;)V",
-                )
-            }
-
-        // ---- HOOK 3: overrideSearchArrival  (entry, pass p1 = card, p2 = index) ----
-        MapsEvSearchArrivalFingerprint.methodOrNull?.apply {
-            addInstruction(
-                0,
-                "invoke-static { p1, p2 }, $EXT->overrideSearchArrival(Ljava/lang/Object;I)V",
-            )
+        // --- helper: inject invoke-static di awal method (entry) ---
+        fun injectEntry(classDef: com.android.tools.smali.dexlib2.iface.ClassDef, method: Method, smali: String) {
+            val mm = mutableClassDefBy(classDef).findMutableMethodOf(method)
+            mm.addInstruction(0, smali)
         }
 
-        // ---- HOOK 4: overrideSearchCardAiio  (sibling 'e' di class Anchor B; entry, pass p1) ----
-        MapsEvSearchArrivalFingerprint.classDefOrNull?.methods
-            ?.firstOrNull { m ->
-                m.parameterTypes.size == 4 &&
-                    m.parameterTypes[1] == "I" && m.parameterTypes[2] == "I" &&
-                    m.parameterTypes[3] == "Ljava/lang/Integer;"
+        classDefForEach { classDef ->
+            // ===== ANCHOR A: class memuat "Invalid remaining meters value:" =====
+            // -> captureRemainingDist (method dgn string itu) + fixRangeMarkerInMse (sibling Rect)
+            val remainingDistMethod = classDef.methods.firstOrNull {
+                it.returnType == "V" && it.hasString("Invalid remaining meters value:")
             }
-            ?.apply {
-                addInstruction(
-                    0,
-                    "invoke-static { p1 }, $EXT->overrideSearchCardAiio(Ljava/lang/Object;)V",
+            if (remainingDistMethod != null) {
+                // HOOK 1: captureRemainingDist (entry, pass p1)
+                injectEntry(
+                    classDef, remainingDistMethod,
+                    "invoke-static { p1 }, $EXT->captureRemainingDist(Ljava/lang/Object;)V",
                 )
-            }
-
-        // ---- HOOK 5: captureFromAdsx  (RETURN injection + simpan lastAdsx) ----
-        // Cari method `h` di class Anchor C: (object, boolean) -> object, satu-satunya yg cocok.
-        MapsEvAdsxClassFingerprint.classDefOrNull?.methods
-            ?.firstOrNull { m ->
-                m.parameterTypes.size == 2 &&
-                    m.parameterTypes[0].startsWith("L") &&
-                    m.parameterTypes[1] == "Z" &&
-                    m.returnType.startsWith("L")
-            }
-            ?.apply {
-                // inject sebelum 'return-object vX' terakhir, pada register yg dikembalikan
-                val returnIndex = instructions.indexOfLast { it.opcode == Opcode.RETURN_OBJECT }
-                if (returnIndex >= 0) {
-                    val reg = getInstruction<OneRegisterInstruction>(returnIndex).registerA
-                    addInstructions(
-                        returnIndex,
-                        """
-                            sput-object v$reg, $EXT->lastAdsx:Ljava/lang/Object;
-                            invoke-static { v$reg }, $EXT->captureFromAdsx(Ljava/lang/Object;)V
-                        """.trimIndent(),
+                // HOOK 2: fixRangeMarkerInMse (sibling: 3 param, param[1] = Rect; entry, pass p3)
+                classDef.methods.firstOrNull { m ->
+                    m.parameterTypes.size == 3 &&
+                        m.parameterTypes[1] == "Landroid/graphics/Rect;"
+                }?.let { mseMethod ->
+                    injectEntry(
+                        classDef, mseMethod,
+                        "invoke-static { p3 }, $EXT->fixRangeMarkerInMse(Ljava/lang/Object;)V",
                     )
                 }
             }
+
+            // ===== ANCHOR B: class memuat "Invalid number for destinationIndex:" =====
+            // -> overrideSearchArrival (method dgn string) + overrideSearchCardAiio (sibling 2-int)
+            val searchArrivalMethod = classDef.methods.firstOrNull {
+                it.hasString("Invalid number for destinationIndex:")
+            }
+            if (searchArrivalMethod != null) {
+                // HOOK 3: overrideSearchArrival (entry, pass p1 = card, p2 = index)
+                injectEntry(
+                    classDef, searchArrivalMethod,
+                    "invoke-static { p1, p2 }, $EXT->overrideSearchArrival(Ljava/lang/Object;I)V",
+                )
+                // HOOK 4: overrideSearchCardAiio (sibling: 4 param I,I,Integer; entry, pass p1)
+                classDef.methods.firstOrNull { m ->
+                    m.parameterTypes.size == 4 &&
+                        m.parameterTypes[1] == "I" && m.parameterTypes[2] == "I" &&
+                        m.parameterTypes[3] == "Ljava/lang/Integer;"
+                }?.let { aiioMethod ->
+                    injectEntry(
+                        classDef, aiioMethod,
+                        "invoke-static { p1 }, $EXT->overrideSearchCardAiio(Ljava/lang/Object;)V",
+                    )
+                }
+            }
+
+            // ===== ANCHOR C: class memuat string Clearcut unik (R8-merged dgn adsx builder) =====
+            // -> captureFromAdsx: cari method (object, boolean) -> object, inject SEBELUM return-object
+            val hasAdsxAnchor = classDef.methods.any {
+                it.hasString("BasicClearcutControllerImpl - CountersMap init()")
+            }
+            if (hasAdsxAnchor) {
+                classDef.methods.firstOrNull { m ->
+                    m.parameterTypes.size == 2 &&
+                        m.parameterTypes[0].startsWith("L") &&
+                        m.parameterTypes[1] == "Z" &&
+                        m.returnType.startsWith("L") &&
+                        m.implementation != null
+                }?.let { adsxMethod ->
+                    val insns = adsxMethod.implementation!!.instructions.toList()
+                    val returnIndex = insns.indexOfLast { it.opcode == Opcode.RETURN_OBJECT }
+                    if (returnIndex >= 0) {
+                        val reg = (insns[returnIndex] as OneRegisterInstruction).registerA
+                        val mm = mutableClassDefBy(classDef).findMutableMethodOf(adsxMethod)
+                        mm.addInstructions(
+                            returnIndex,
+                            """
+                                sput-object v$reg, $EXT->lastAdsx:Ljava/lang/Object;
+                                invoke-static { v$reg }, $EXT->captureFromAdsx(Ljava/lang/Object;)V
+                            """.trimIndent(),
+                        )
+                    }
+                }
+            }
+        }
     }
 }
