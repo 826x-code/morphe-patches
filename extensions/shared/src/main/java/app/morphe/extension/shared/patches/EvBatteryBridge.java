@@ -5,6 +5,7 @@ import android.content.ContentResolver;
 import android.net.Uri;
 import android.os.Bundle;
 import android.os.SystemClock;
+import android.util.Log;
 
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
@@ -37,6 +38,8 @@ import java.lang.reflect.Method;
  *     Ini pilihan port yang aman; smali asli mengandalkan exception propagate ke caller.
  */
 public final class EvBatteryBridge {
+
+    private static final String TAG = "EvBridge";
 
     // content provider authority milik provider2 (app.morphe.byd.provider2 -> EnergyModelProvider)
     private static final String PROVIDER_URI = "content://app.morphe.byd.energy";
@@ -97,6 +100,7 @@ public final class EvBatteryBridge {
         float lr = b.getFloat("learned_rate", 0f);
         if (lr > 0f) configLearnedRate = lr;
         else         configLearnedRate = lastDrivingWhPerKm;
+        Log.i(TAG, "loadCorrectionConfig learned_rate=" + lr + " bypass=" + bypassCorrection + " -> configLearnedRate=" + configLearnedRate);
 
         float[] buckets = new float[10];
         boolean any = false;
@@ -263,6 +267,7 @@ public final class EvBatteryBridge {
      *   adsx.d.c.c (float) = driving Wh/km
      */
     public static void captureFromAdsx(Object adsx) {
+        Log.i(TAG, "captureFromAdsx fired adsx=" + adsx);
         if (adsx == null) return;
         try {
             Object c = getField(adsx, "c");
@@ -273,6 +278,7 @@ public final class EvBatteryBridge {
                     int level = (Integer) getField(cd, "c");
                     int cap   = (Integer) getField(ce, "c");
                     setCurrentLevel(level, cap);
+                    Log.i(TAG, "captureFromAdsx level=" + level + " cap=" + cap);
                 }
             }
             Object d = getField(adsx, "d");
@@ -294,6 +300,7 @@ public final class EvBatteryBridge {
      * Peta (26.03): o.d().k (int).
      */
     public static void captureRemainingDist(Object o) {
+        Log.i(TAG, "captureRemainingDist fired o=" + o);
         if (o == null) return;
         try {
             Object r = o.getClass().getMethod("d").invoke(o);
@@ -314,6 +321,7 @@ public final class EvBatteryBridge {
      *   elem.d (declared) -> target flag holder; elem.a.c -> marker; marker.e.b/.c -> flags/value
      */
     public static void fixRangeMarkerInMse(Object mse) {
+        Log.i(TAG, "fixRangeMarkerInMse fired mse=" + mse);
         if (mse == null) return;
         try {
             loadCorrectionConfig();
@@ -397,12 +405,13 @@ public final class EvBatteryBridge {
      * @param idx index entry dalam array card.b
      */
     public static void overrideSearchArrival(Object card, int idx) {
+        Log.i(TAG, "overrideSearchArrival fired card=" + card + " idx=" + idx);
         if (card == null) return;
         try {
             loadCorrectionConfig();
-            if (bypassCorrection) return;
-            if (lastCurrentLevelWh <= 0) return;
-            if (configLearnedRate <= 0f) return;
+            if (bypassCorrection) { Log.i(TAG, "arrival: bypass"); return; }
+            if (lastCurrentLevelWh <= 0) { Log.i(TAG, "arrival: level<=0 (" + lastCurrentLevelWh + ")"); return; }
+            if (configLearnedRate <= 0f) { Log.i(TAG, "arrival: rate<=0 (" + configLearnedRate + ")"); return; }
 
             Object[] arr = (Object[]) getField(card, "b");
             if (arr == null || idx < 0 || idx >= arr.length) return;
@@ -495,6 +504,7 @@ public final class EvBatteryBridge {
      *   aiio.b -> Object[]; tiap el.d -> seg ; seg.b flag: arrival>0 -> &-5 ; else c/d=range, |12
      */
     public static void overrideSearchCardAiio(Object aiio) {
+        Log.i(TAG, "overrideSearchCardAiio fired aiio=" + aiio);
         if (aiio == null) return;
         try {
             loadCorrectionConfig();
@@ -555,4 +565,3 @@ public final class EvBatteryBridge {
         f.set(o, val);
     }
 }
-
