@@ -39,7 +39,7 @@ internal val mapsForceGmsAvailablePatch = bytecodePatch {
 @Suppress("unused")
 val gmsCoreSupportPatch = gmsCoreSupportPatch(
     fromPackageName = MAPS_PACKAGE_NAME,
-    toPackageName = MORPHE_MAPS_PACKAGE_NAME,
+    toPackageName = MAPS_PACKAGE_NAME,
     // Maps has no "prime" method and no Cast context (unlike YouTube/Music).
     primeMethodFingerprint = null,
     earlyReturnFingerprints = setOf(),
