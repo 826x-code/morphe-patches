@@ -62,7 +62,7 @@ val evBatteryBridgePatch = bytecodePatch(
                 // HOOK 1: captureRemainingDist (entry, pass p1)
                 injectEntry(
                     classDef, remainingDistMethod,
-                    "invoke-static { p1 }, $EXT->captureRemainingDist(Ljava/lang/Object;)V",
+                    "invoke-static/range { p1 .. p1 }, $EXT->captureRemainingDist(Ljava/lang/Object;)V",
                 )
                 // HOOK 2: fixRangeMarkerInMse (sibling: 3 param, param[1] = Rect; entry, pass p3)
                 classDef.methods.firstOrNull { m ->
@@ -71,7 +71,7 @@ val evBatteryBridgePatch = bytecodePatch(
                 }?.let { mseMethod ->
                     injectEntry(
                         classDef, mseMethod,
-                        "invoke-static { p3 }, $EXT->fixRangeMarkerInMse(Ljava/lang/Object;)V",
+                        "invoke-static/range { p3 .. p3 }, $EXT->fixRangeMarkerInMse(Ljava/lang/Object;)V",
                     )
                 }
             }
@@ -85,7 +85,7 @@ val evBatteryBridgePatch = bytecodePatch(
                 // HOOK 3: overrideSearchArrival (entry, pass p1 = card, p2 = index)
                 injectEntry(
                     classDef, searchArrivalMethod,
-                    "invoke-static { p1, p2 }, $EXT->overrideSearchArrival(Ljava/lang/Object;I)V",
+                    "invoke-static/range { p1 .. p2 }, $EXT->overrideSearchArrival(Ljava/lang/Object;I)V",
                 )
                 // HOOK 4: overrideSearchCardAiio (sibling: 4 param I,I,Integer; entry, pass p1)
                 classDef.methods.firstOrNull { m ->
@@ -95,7 +95,7 @@ val evBatteryBridgePatch = bytecodePatch(
                 }?.let { aiioMethod ->
                     injectEntry(
                         classDef, aiioMethod,
-                        "invoke-static { p1 }, $EXT->overrideSearchCardAiio(Ljava/lang/Object;)V",
+                        "invoke-static/range { p1 .. p1 }, $EXT->overrideSearchCardAiio(Ljava/lang/Object;)V",
                     )
                 }
             }
@@ -122,7 +122,7 @@ val evBatteryBridgePatch = bytecodePatch(
                             returnIndex,
                             """
                                 sput-object v$reg, $EXT->lastAdsx:Ljava/lang/Object;
-                                invoke-static { v$reg }, $EXT->captureFromAdsx(Ljava/lang/Object;)V
+                                invoke-static/range { v$reg .. v$reg }, $EXT->captureFromAdsx(Ljava/lang/Object;)V
                             """.trimIndent(),
                         )
                     }
