@@ -128,6 +128,28 @@ val evBatteryBridgePatch = bytecodePatch(
                     }
                 }
             }
+
+            // ===== HOOK 6: Lgir;->b reads lastAdsx — coalesce null adsx param with cached =====
+            // Anchor: instance method, 5 params, param[3] = j$.time.Duration, returns Object,
+            // param[2] = adsx type (obfuscated). Inject at entry: p3 = coalesceAdsx(p3).
+            classDef.methods.firstOrNull { m ->
+                m.parameterTypes.size == 5 &&
+                    m.parameterTypes[3] == "Lj\$/time/Duration;" &&
+                    m.returnType == "Ljava/lang/Object;" &&
+                    m.parameterTypes[2].startsWith("L") &&
+                    m.implementation != null
+            }?.let { gMethod ->
+                val adsxType = gMethod.parameterTypes[2]
+                val mm = mutableClassDefBy(classDef).findMutableMethodOf(gMethod)
+                mm.addInstructions(
+                    0,
+                    """
+                        invoke-static/range { p3 .. p3 }, $EXT->coalesceAdsx(Ljava/lang/Object;)Ljava/lang/Object;
+                        move-result-object p3
+                        check-cast p3, $adsxType
+                    """.trimIndent(),
+                )
+            }
         }
     }
 }
