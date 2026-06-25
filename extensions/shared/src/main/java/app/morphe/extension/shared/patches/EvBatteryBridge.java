@@ -266,6 +266,17 @@ public final class EvBatteryBridge {
      *   adsx.c.e.c (int)   = capacity Wh
      *   adsx.d.c.c (float) = driving Wh/km
      */
+
+    /**
+     * HOOK 6 helper: dipanggil dari Lgir;->b. Kalau adsx yang dilempar Maps null,
+     * substitusi dengan lastAdsx cache (yang di-set captureFromAdsx). Replikasi
+     * null-coalesce yang di build Thai di-inline di Lgir;->b.
+     */
+    public static Object coalesceAdsx(Object adsx) {
+        Log.i(TAG, "coalesceAdsx fired adsx=" + adsx + " lastAdsx=" + lastAdsx);
+        return (adsx != null) ? adsx : lastAdsx;
+    }
+
     public static void captureFromAdsx(Object adsx) {
         Log.i(TAG, "captureFromAdsx fired adsx=" + adsx);
         if (adsx == null) return;
