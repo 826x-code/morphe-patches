@@ -1,8 +1,11 @@
 package app.morphe.patches.maps.ev
 
 import app.morphe.patcher.patch.bytecodePatch
+import app.morphe.patcher.patch.resourcePatch
 import app.morphe.patcher.extensions.InstructionExtensions.addInstruction
 import app.morphe.patcher.extensions.InstructionExtensions.addInstructions
+import app.morphe.patches.maps.misc.extension.sharedExtensionPatch
+import app.morphe.patches.maps.shared.Constants.COMPATIBILITY_MAPS
 import app.morphe.util.findMutableMethodOf
 import com.android.tools.smali.dexlib2.Opcode
 import com.android.tools.smali.dexlib2.iface.Method
@@ -27,12 +30,34 @@ import com.android.tools.smali.dexlib2.iface.reference.StringReference
 
 private const val EXT = "Lapp/morphe/extension/shared/patches/EvBatteryBridge;"
 
+private val evBatteryBridgeResourcePatch = resourcePatch {
+    execute {
+        val manifest = get("AndroidManifest.xml")
+        val text = manifest.readText()
+
+        if ("app.morphe.byd.energy" !in text) {
+            manifest.writeText(
+                text.replace(
+                    "</queries>",
+                    """
+                        <package android:name="app.morphe.byd.provider2"/>
+                        <provider android:authorities="app.morphe.byd.energy;google_maps_vehicle_profile"/>
+                    </queries>
+                    """.trimIndent(),
+                )
+            )
+        }
+    }
+}
+
 @Suppress("unused")
 val evBatteryBridgePatch = bytecodePatch(
     name = "EV battery bridge (AAOS)",
     description = "Inject EvBatteryBridge hooks for AAOS Maps EV/SOC route planning. No-op on mobile.",
 ) {
-    compatibleWith("com.google.android.apps.maps")
+    dependsOn(sharedExtensionPatch, evBatteryBridgeResourcePatch)
+
+    compatibleWith(COMPATIBILITY_MAPS)
 
     execute {
         // --- helper: apakah method memuat const-string yang mengandung `needle` ---
@@ -134,9 +159,9 @@ val evBatteryBridgePatch = bytecodePatch(
             // param[2] = adsx type (obfuscated). Inject at entry: p3 = coalesceAdsx(p3).
             classDef.methods.firstOrNull { m ->
                 m.parameterTypes.size == 5 &&
+                    m.parameterTypes[2] == "Ladsx;" &&
                     m.parameterTypes[3] == "Lj\$/time/Duration;" &&
                     m.returnType == "Ljava/lang/Object;" &&
-                    m.parameterTypes[2].startsWith("L") &&
                     m.implementation != null
             }?.let { gMethod ->
                 val adsxType = gMethod.parameterTypes[2]
