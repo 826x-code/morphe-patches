@@ -1,6 +1,8 @@
 rootProject.name = "morphe-patches"
 
 pluginManagement {
+    file("../morphe-patches-gradle-plugin").takeIf { it.exists() }?.let(::includeBuild)
+
     repositories {
         mavenLocal()
         gradlePluginPortal()

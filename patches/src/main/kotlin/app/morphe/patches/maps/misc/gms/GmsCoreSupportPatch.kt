@@ -8,7 +8,6 @@ import app.morphe.patches.all.misc.packagename.setOrGetFallbackPackageName
 import app.morphe.patches.maps.misc.extension.sharedExtensionPatch
 import app.morphe.patches.maps.shared.Constants.COMPATIBILITY_MAPS
 import app.morphe.patches.maps.shared.Constants.MAPS_PACKAGE_NAME
-import app.morphe.patches.maps.shared.Constants.MORPHE_MAPS_PACKAGE_NAME
 import app.morphe.patches.shared.misc.gms.gmsCoreSupportPatch
 import org.w3c.dom.Element
 import org.w3c.dom.Node
@@ -39,7 +38,8 @@ internal val mapsForceGmsAvailablePatch = bytecodePatch {
 @Suppress("unused")
 val gmsCoreSupportPatch = gmsCoreSupportPatch(
     fromPackageName = MAPS_PACKAGE_NAME,
-    toPackageName = MORPHE_MAPS_PACKAGE_NAME,
+    // BYD GPack whitelists the original Maps package while driving.
+    toPackageName = MAPS_PACKAGE_NAME,
     // Maps has no "prime" method and no Cast context (unlike YouTube/Music).
     primeMethodFingerprint = null,
     earlyReturnFingerprints = setOf(),
@@ -49,6 +49,11 @@ val gmsCoreSupportPatch = gmsCoreSupportPatch(
     mainActivityOnCreateFingerprint = MapsMainActivityOnCreateFingerprint,
     extensionPatch = sharedExtensionPatch,
     gmsCoreSupportResourcePatchFactory = ::mapsGmsCoreSupportResourcePatch,
+    executeBlock = {
+        // Keeping the original package would otherwise trigger the root-install warning
+        // and redirect Maps to morphe.software.
+        MapsIsPackageNameOriginalFingerprint.method.returnEarly(false)
+    },
 ) {
     dependsOn(sharedExtensionPatch, mapsForceGmsAvailablePatch)
     compatibleWith(COMPATIBILITY_MAPS)
@@ -72,7 +77,7 @@ private fun mapsGmsCoreSupportResourcePatch() = resourcePatch {
             appendChild(child)
         }
 
-        val packageName = setOrGetFallbackPackageName(MORPHE_MAPS_PACKAGE_NAME)
+        val packageName = setOrGetFallbackPackageName(MAPS_PACKAGE_NAME)
 
         // --- patchManifest() ---
         val transformations = mapOf(

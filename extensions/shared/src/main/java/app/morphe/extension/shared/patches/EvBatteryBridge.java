@@ -7,9 +7,12 @@ import android.os.Bundle;
 import android.os.SystemClock;
 import android.util.Log;
 
+import java.io.ByteArrayOutputStream;
+import java.io.InputStream;
 import java.lang.reflect.Constructor;
 import java.lang.reflect.Field;
 import java.lang.reflect.Method;
+import java.lang.reflect.Modifier;
 
 /**
  * EvBatteryBridge — rekonstruksi dari APK Thai (Maps AAOS 26.03.020003.E).
@@ -50,14 +53,75 @@ public final class EvBatteryBridge {
     public  static long    cachedRemainingDistM;
     private static long    cachedRemainingTs;
     private static float[] configBucketRates;     // 10 rate Wh/km per bucket SOC (10% tiap bucket)
-    private static float   configLearnedRate;     // rate fallback linear (Wh/km)
+    private static float   configLearnedRate = 150.0f; // rate fallback linear (Wh/km)
+    private static long    lastProviderReadTs;
     public  static Object  lastAdsx;              // cache route-state object terakhir
     public  static long    lastCapacityWh;        // kapasitas baterai (Wh)
     public  static int     lastCurrentLevelWh;    // SOC sekarang (Wh) -> sumber angka di layar
-    public  static float   lastDrivingWhPerKm;    // konsumsi terukur (Wh/km)
+    public  static float   lastDrivingWhPerKm = 150.0f; // konsumsi terukur (Wh/km)
     public  static long    lastLevelWh;
-
     public EvBatteryBridge() {}
+
+    /**
+     * Seeds Maps' embedded EV connector manager when no OEM profile is available.
+     * Connector enum values: MENNEKES/Type 2 = 3, CCS_COMBO_2 = 6.
+     */
+    public static void seedSealionConnectorProfile(Object manager) {
+        if (manager == null) return;
+        try {
+            for (Field managerField : manager.getClass().getDeclaredFields()) {
+                Class<?> profileType = managerField.getType();
+                Constructor<?> profileConstructor = null;
+                Class<?> connectorListType = null;
+
+                for (Constructor<?> constructor : profileType.getDeclaredConstructors()) {
+                    Class<?>[] parameters = constructor.getParameterTypes();
+                    if (parameters.length == 5
+                            && parameters[0] == String.class
+                            && parameters[1] == String.class
+                            && parameters[2] == String.class
+                            && parameters[3] == parameters[4]
+                            && java.util.Collection.class.isAssignableFrom(parameters[3])) {
+                        profileConstructor = constructor;
+                        connectorListType = parameters[3];
+                        break;
+                    }
+                }
+                if (profileConstructor == null || connectorListType == null) continue;
+
+                Method twoItemFactory = null;
+                for (Method method : connectorListType.getDeclaredMethods()) {
+                    Class<?>[] parameters = method.getParameterTypes();
+                    if (Modifier.isStatic(method.getModifiers())
+                            && method.getReturnType() == connectorListType
+                            && parameters.length == 2
+                            && parameters[0] == Object.class
+                            && parameters[1] == Object.class) {
+                        twoItemFactory = method;
+                        break;
+                    }
+                }
+                if (twoItemFactory == null) continue;
+
+                twoItemFactory.setAccessible(true);
+                Object connectors = twoItemFactory.invoke(null, Integer.valueOf(3), Integer.valueOf(6));
+                profileConstructor.setAccessible(true);
+                Object profile = profileConstructor.newInstance(
+                        "byd_sealion_7",
+                        "byd_sealion_7",
+                        "BYD Sealion 7",
+                        connectors,
+                        connectors
+                );
+                managerField.setAccessible(true);
+                managerField.set(manager, profile);
+                return;
+            }
+            Log.w(TAG, "Unable to locate embedded EV connector profile field");
+        } catch (Throwable t) {
+            Log.w(TAG, "Failed to seed Sealion 7 connector profile", t);
+        }
+    }
 
     // =====================================================================================
     // SISI BACA / COMPUTE (logic murni — tidak menyentuh class Maps)
@@ -91,24 +155,122 @@ public final class EvBatteryBridge {
     private static void loadCorrectionConfig() {
         Context ctx = getContext();
         if (ctx == null) return;
-        Bundle b = ctx.getContentResolver().call(
-                Uri.parse(PROVIDER_URI), "correction_config", null, null);
-        if (b == null) return;
+        refreshEnergyModel(ctx);
+        try {
+            Bundle b = ctx.getContentResolver().call(
+                    Uri.parse(PROVIDER_URI), "correction_config", null, null);
+            if (b == null) return;
 
-        bypassCorrection = b.getBoolean("bypass", false);
+            bypassCorrection = b.getBoolean("bypass", false);
 
-        float lr = b.getFloat("learned_rate", 0f);
-        if (lr > 0f) configLearnedRate = lr;
-        else         configLearnedRate = lastDrivingWhPerKm;
-        Log.i(TAG, "loadCorrectionConfig learned_rate=" + lr + " bypass=" + bypassCorrection + " -> configLearnedRate=" + configLearnedRate);
+            float lr = b.getFloat("learned_rate", 0f);
+            if (lr > 0f) configLearnedRate = lr;
+            else         configLearnedRate = lastDrivingWhPerKm;
 
-        float[] buckets = new float[10];
-        boolean any = false;
-        for (int i = 0; i < 10; i++) {
-            buckets[i] = b.getFloat("rate_bucket_" + i, -1f);
-            if (buckets[i] > 0f) any = true;
+            float[] buckets = new float[10];
+            boolean any = false;
+            for (int i = 0; i < 10; i++) {
+                buckets[i] = b.getFloat("rate_bucket_" + i, -1f);
+                if (buckets[i] > 0f) any = true;
+            }
+            if (any) configBucketRates = buckets;
+        } catch (Throwable ignored) {
         }
-        if (any) configBucketRates = buckets;
+    }
+
+    /** Read SOC and capacity directly from Provider2's protobuf /model endpoint. */
+    private static void refreshEnergyModel(Context ctx) {
+        long now = SystemClock.elapsedRealtime();
+        if (now - lastProviderReadTs < 1000L) return;
+        lastProviderReadTs = now;
+
+        try (InputStream input = ctx.getContentResolver().openInputStream(
+                Uri.parse(PROVIDER_URI + "/model"));
+             ByteArrayOutputStream output = new ByteArrayOutputStream()) {
+            if (input == null) return;
+            byte[] buffer = new byte[1024];
+            int count;
+            while ((count = input.read(buffer)) != -1) output.write(buffer, 0, count);
+            byte[] model = output.toByteArray();
+
+            int[] pos = {0};
+            while (pos[0] < model.length) {
+                long tag = readVarint(model, pos, model.length);
+                int field = (int) (tag >>> 3);
+                int wireType = (int) (tag & 7);
+                if (wireType == 2) {
+                    int length = (int) readVarint(model, pos, model.length);
+                    int end = pos[0] + length;
+                    if (length < 0 || end < pos[0] || end > model.length) return;
+                    if (field == 1 && parseBatteryModel(model, pos[0], end)) return;
+                    pos[0] = end;
+                } else {
+                    skipField(model, pos, model.length, wireType);
+                }
+            }
+        } catch (Throwable ignored) {
+        }
+    }
+
+    private static boolean parseBatteryModel(byte[] data, int start, int end) {
+        int levelWh = -1;
+        int capacityWh = -1;
+        int[] pos = {start};
+        while (pos[0] < end) {
+            long tag = readVarint(data, pos, end);
+            int field = (int) (tag >>> 3);
+            int wireType = (int) (tag & 7);
+            if (wireType == 2) {
+                int length = (int) readVarint(data, pos, end);
+                int valueEnd = pos[0] + length;
+                if (length < 0 || valueEnd < pos[0] || valueEnd > end) return false;
+                if (field == 3) levelWh = readWrappedInt(data, pos[0], valueEnd);
+                if (field == 4) capacityWh = readWrappedInt(data, pos[0], valueEnd);
+                pos[0] = valueEnd;
+            } else {
+                skipField(data, pos, end, wireType);
+            }
+        }
+        if (levelWh >= 0 && capacityWh >= 1000 && levelWh <= capacityWh) {
+            setCurrentLevel(levelWh, capacityWh);
+            return true;
+        }
+        return false;
+    }
+
+    private static int readWrappedInt(byte[] data, int start, int end) {
+        int[] pos = {start};
+        long tag = readVarint(data, pos, end);
+        if ((tag >>> 3) != 1 || (tag & 7) != 0) return -1;
+        long value = readVarint(data, pos, end);
+        return value >= 0 && value <= Integer.MAX_VALUE ? (int) value : -1;
+    }
+
+    private static long readVarint(byte[] data, int[] pos, int end) {
+        long value = 0;
+        for (int shift = 0; shift < 64 && pos[0] < end; shift += 7) {
+            int current = data[pos[0]++] & 0xff;
+            value |= (long) (current & 0x7f) << shift;
+            if ((current & 0x80) == 0) return value;
+        }
+        throw new IllegalArgumentException("Invalid protobuf varint");
+    }
+
+    private static void skipField(byte[] data, int[] pos, int end, int wireType) {
+        switch (wireType) {
+            case 0:
+                readVarint(data, pos, end);
+                return;
+            case 1:
+                pos[0] += 8;
+                break;
+            case 5:
+                pos[0] += 4;
+                break;
+            default:
+                throw new IllegalArgumentException("Unsupported protobuf wire type");
+        }
+        if (pos[0] > end) throw new IllegalArgumentException("Truncated protobuf field");
     }
 
     /** Petakan energi Wh ke index bucket SOC 0..9 (tiap bucket = 10% kapasitas). */
@@ -273,13 +435,12 @@ public final class EvBatteryBridge {
      * null-coalesce yang di build Thai di-inline di Lgir;->b.
      */
     public static Object coalesceAdsx(Object adsx) {
-        Log.i(TAG, "coalesceAdsx fired adsx=" + adsx + " lastAdsx=" + lastAdsx);
         return (adsx != null) ? adsx : lastAdsx;
     }
 
     public static void captureFromAdsx(Object adsx) {
-        Log.i(TAG, "captureFromAdsx fired adsx=" + adsx);
         if (adsx == null) return;
+        lastAdsx = adsx;
         try {
             Object c = getField(adsx, "c");
             if (c != null) {
@@ -289,7 +450,6 @@ public final class EvBatteryBridge {
                     int level = (Integer) getField(cd, "c");
                     int cap   = (Integer) getField(ce, "c");
                     setCurrentLevel(level, cap);
-                    Log.i(TAG, "captureFromAdsx level=" + level + " cap=" + cap);
                 }
             }
             Object d = getField(adsx, "d");
@@ -311,7 +471,6 @@ public final class EvBatteryBridge {
      * Peta (26.03): o.d().k (int).
      */
     public static void captureRemainingDist(Object o) {
-        Log.i(TAG, "captureRemainingDist fired o=" + o);
         if (o == null) return;
         try {
             Object r = o.getClass().getMethod("d").invoke(o);
@@ -332,7 +491,6 @@ public final class EvBatteryBridge {
      *   elem.d (declared) -> target flag holder; elem.a.c -> marker; marker.e.b/.c -> flags/value
      */
     public static void fixRangeMarkerInMse(Object mse) {
-        Log.i(TAG, "fixRangeMarkerInMse fired mse=" + mse);
         if (mse == null) return;
         try {
             loadCorrectionConfig();
@@ -410,32 +568,28 @@ public final class EvBatteryBridge {
      * HOOK: "Arrive with X%" pada kartu search arrival.
      * INTRICATE — verifikasi empiris. Peta (26.03):
      *   card.b -> Object[]; card.b[idx] = entry
-     *   entry.a.c -> route; route.h.e.b (flags), &1 -> route.h.e.c (dist int)
-     *   entry.e (slot) -> kalau null, instantiate defpackage.ahxm; isi d/d/f (Wh,Wh,cap=44900 fallback)
-     *   entry.b flags: (&-513)|28 ; clear -5 / set 12 ; route.p.c = consumed, route.p.b |= 1
+     *   entry.a.c (fallback card.a.h) -> section; section.e -> route
+     *   entry.e (slot) -> kalau null, instantiate defpackage.ahxm; isi d/e/f
+     *   entry.d flags: clear -5 / set 12; card.a.h.p menyimpan energi terpakai
      * @param idx index entry dalam array card.b
      */
     public static void overrideSearchArrival(Object card, int idx) {
-        Log.i(TAG, "overrideSearchArrival fired card=" + card + " idx=" + idx);
         if (card == null) return;
         try {
             loadCorrectionConfig();
-            if (bypassCorrection) { Log.i(TAG, "arrival: bypass"); return; }
-            if (lastCurrentLevelWh <= 0) { Log.i(TAG, "arrival: level<=0 (" + lastCurrentLevelWh + ")"); return; }
-            if (configLearnedRate <= 0f) { Log.i(TAG, "arrival: rate<=0 (" + configLearnedRate + ")"); return; }
+            if (bypassCorrection) return;
+            if (lastCurrentLevelWh <= 0) return;
+            if (configLearnedRate <= 0f) return;
 
             Object[] arr = (Object[]) getField(card, "b");
             if (arr == null || idx < 0 || idx >= arr.length) return;
             Object entry = arr[idx];
             if (entry == null) return;
 
-            // route = entry.a.c ; kalau null -> entry.a.h.e
-            Object route = getField(getField(entry, "a"), "c");
-            if (route == null) {
-                Object ah = getField(getField(entry, "a"), "h");
-                if (ah == null) return;
-                route = getField(ah, "e");
-            }
+            Object section = getField(getField(entry, "a"), "c");
+            if (section == null) section = getField(getField(card, "a"), "h");
+            if (section == null) return;
+            Object route = getField(section, "e");
             if (route == null) return;
 
             // distInt = route.b (flags &1) -> route.c
@@ -465,9 +619,9 @@ public final class EvBatteryBridge {
                 slot = ctor.newInstance();
                 setField(entry, "e", slot);
             }
-            // isi slot.d = arrivalWh (dua kali, ke field "d")
+            // Kedua field wajib diisi; build lama keliru menulis field d dua kali.
             setField(slot, "d", Integer.valueOf(arrivalWh));
-            setField(slot, "d", Integer.valueOf(arrivalWh));
+            setField(slot, "e", Integer.valueOf(arrivalWh));
 
             int capWh = (int) lastCapacityWh;
             if (capWh <= 0) capWh = 44900;          // fallback kapasitas
@@ -478,8 +632,8 @@ public final class EvBatteryBridge {
             sf = (sf & -513) | 28;
             setField(slot, "b", Integer.valueOf(sf));
 
-            // route.d -> kalau ada: flag &-5 (kalau arrivalWh>0) ; else set range + |12
-            Object rd = getField(route, "d");
+            // Holder range berada pada entry, bukan pada route.
+            Object rd = getField(entry, "d");
             if (rd != null) {
                 int rdFlag = (Integer) getField(rd, "b");
                 if (arrivalWh > 0) {
@@ -492,10 +646,10 @@ public final class EvBatteryBridge {
                 }
             }
 
-            // route.a.e.p : set consumed + flag |1
-            Object rae = getField(getField(route, "a"), "e");
-            if (rae != null) {
-                Object p = getField(rae, "p");
+            // Holder konsumsi berada pada card.a.h.p.
+            Object cardSection = getField(getField(card, "a"), "h");
+            if (cardSection != null) {
+                Object p = getField(cardSection, "p");
                 if (p != null) {
                     setField(p, "c", Integer.valueOf(lastCurrentLevelWh - arrivalWh));
                     int pf = (Integer) getField(p, "b");
@@ -511,11 +665,10 @@ public final class EvBatteryBridge {
      * HOOK: kartu search "aiio". Override arrival% + range pada entri kartu.
      * INTRICATE — verifikasi empiris. Peta (26.03):
      *   aiio.a.h -> sect ; sect.e -> route ; route.b (flags &1) -> route.c (dist int)
-     *   route.p.c = consumed, route.p.b |= 1
+     *   sect.p.c = consumed, sect.p.b |= 1
      *   aiio.b -> Object[]; tiap el.d -> seg ; seg.b flag: arrival>0 -> &-5 ; else c/d=range, |12
      */
     public static void overrideSearchCardAiio(Object aiio) {
-        Log.i(TAG, "overrideSearchCardAiio fired aiio=" + aiio);
         if (aiio == null) return;
         try {
             loadCorrectionConfig();
@@ -537,8 +690,8 @@ public final class EvBatteryBridge {
             arrivalWh = roundedArrivalWh(arrivalWh, (int) lastCapacityWh, lastCurrentLevelWh);
             int consumed = lastCurrentLevelWh - arrivalWh;
 
-            // route.p : consumed + flag |1
-            Object p = getField(route, "p");
+            // Konsumsi tersimpan di section, bukan di route.e.
+            Object p = getField(sect, "p");
             if (p != null) {
                 setField(p, "c", Integer.valueOf(consumed));
                 int pf = (Integer) getField(p, "b");

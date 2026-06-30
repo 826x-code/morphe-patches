@@ -3,6 +3,17 @@ package app.morphe.patches.maps.misc.gms
 import app.morphe.patcher.Fingerprint
 import com.android.tools.smali.dexlib2.AccessFlags
 
+private const val GMS_CORE_EXTENSION_CLASS =
+    "Lapp/morphe/extension/shared/patches/GmsCoreSupportPatch;"
+
+internal object MapsIsPackageNameOriginalFingerprint : Fingerprint(
+    definingClass = GMS_CORE_EXTENSION_CLASS,
+    name = "isPackageNameOriginal",
+    accessFlags = listOf(AccessFlags.PUBLIC, AccessFlags.STATIC),
+    returnType = "Z",
+    parameters = listOf(),
+)
+
 /**
  * GmmActivity.onCreate(Bundle). The declared launcher activity
  * com.google.android.maps.MapsActivity extends an obfuscated base ("Lmrl;" in 26.20.x)
